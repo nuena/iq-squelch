@@ -23,6 +23,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <string.h>
 
+#include <czmq.h>
+
 #define DEFAULT_AUTO_MODE           false
 #define DEFAULT_BLOCK_COUNT         0
 #define DEFAULT_BLOCK_SIZE          1024
@@ -32,6 +34,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define DEFAULT_PADDING_BLOCKS      true
 #define DEFAULT_SAMPLE_THRESHOLD    10
 #define DEFAULT_VERBOSE_MODE        false
+#define DEFAULT_ZMQ                 false
 
 struct
 {
@@ -46,6 +49,9 @@ struct
   bool       padding_blocks;
   uint8_t    sample_threshold;
   bool       verbose;
+  bool       zmq_enabled;
+  char      *zmq_sub_url;
+  char      *zmq_pub_url;
 } options;
 
 void usage()
@@ -65,6 +71,8 @@ void usage()
     "  -t THRESHOLD    Percentage of a block that must be over the threshold\n"
     "                  before that block is output (default: 50%%)\n"
     "  -v              Verbose mode\n"
+    "  -y ZMQ-SUB-URL  ZMQ SUB URL from which data is read \n"
+    "  -z ZMQ-PUB-URL  ZMQ PUB URL to which data is sent\n"
     "\n"
     );
 }
@@ -169,6 +177,9 @@ int main(int argc, char *argv[])
 {
   int opt;
 
+  bool zmq_sub_isset = false;  // just to track if the options are set correctly.
+  bool zmq_pub_isset = false;
+
   options.auto_mode         = DEFAULT_AUTO_MODE;
   options.block_size        = DEFAULT_BLOCK_SIZE;
   options.block_count       = DEFAULT_BLOCK_COUNT;
@@ -179,7 +190,7 @@ int main(int argc, char *argv[])
   options.sample_threshold  = DEFAULT_SAMPLE_THRESHOLD;
   options.verbose           = DEFAULT_VERBOSE_MODE;
 
-  while ((opt = getopt(argc, argv, "ab:c:o:pm:s:t:v")) > 0) {
+  while ((opt = getopt(argc, argv, "ab:c:o:pm:s:t:vy:z:")) > 0) {
     switch (opt) {
       case 'a':
         options.auto_mode = true;
@@ -194,11 +205,6 @@ int main(int argc, char *argv[])
         if (strcmp(optarg, "-") == 0) {
           options.output_file = stdout;
         } else {
-          options.output_file = fopen(optarg, "wb");
-          if (options.output_file == NULL) {
-            perror(optarg);
-            exit(EXIT_FAILURE);
-          }
           options.output_filename = optarg;
         }
         break;
@@ -217,6 +223,16 @@ int main(int argc, char *argv[])
       case 'v':
         options.verbose = true;
         break;
+      case 'y':
+        options.zmq_enabled = true;
+        options.zmq_sub_url = optarg;
+        zmq_sub_isset = true;
+        break;
+      case 'z':
+        options.zmq_enabled = true;
+        options.zmq_pub_url = optarg;
+        zmq_pub_isset = true;
+        break;
       default:
         usage();
         exit(EXIT_FAILURE);
@@ -224,19 +240,36 @@ int main(int argc, char *argv[])
     }
   }
 
-  if (optind < argc) {
-    if (strcmp(argv[optind], "-") == 0) {
-      options.input_file = stdin;
-    } else {
-      options.input_file = fopen(argv[optind], "rb");
-      if (options.input_file == NULL) {
-        perror(argv[optind]);
-        exit(EXIT_FAILURE);
-      }
+
+
+
+  if(options.zmq_enabled) {
+    // verify that both SUB and PUB url are set:
+    if (!(zmq_pub_isset && zmq_sub_isset)) {
+      fprintf(stderr, "You specified one of the two ZMQ options. Both -y and -z must be set if you use ZMQ... Exiting");
+      exit(EXIT_FAILURE);
     }
   } else {
-    usage();
-    exit(EXIT_FAILURE);
+    if (optind < argc) {
+      if (strcmp(argv[optind], "-") == 0) {
+        options.input_file = stdin;
+      } else {
+        options.input_file = fopen(argv[optind], "rb");
+        if (options.input_file == NULL) {
+          perror(argv[optind]);
+          exit(EXIT_FAILURE);
+        }
+      }
+    } else {
+      usage();
+      exit(EXIT_FAILURE);
+    }
+
+    options.output_file = fopen(optarg, "wb");
+    if (options.output_file == NULL) {
+      perror(optarg);
+      exit(EXIT_FAILURE);
+    }
   }
 
   if (options.verbose) {
@@ -252,15 +285,17 @@ int main(int argc, char *argv[])
     fprintf(stderr, "     Output File: %s\n",
         options.output_file == stdout ? "stdout" : options.output_filename);
     fprintf(stderr, "\n");
+
+    // TODO: add ZMQ output stuff.
   }
 
   run();
 
-  if (options.input_file != stdin) {
+  if (! options.zmq_enabled && options.input_file != stdin) {
     fclose(options.input_file);
   }
 
-  if (options.output_file != stdout) {
+  if (! options.zmq_enabled && options.output_file != stdout) {
     fclose(options.output_file);
   }
 
