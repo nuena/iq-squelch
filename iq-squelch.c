@@ -24,6 +24,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <string.h>
 
 #include <czmq.h>
+#include <signal.h>
 
 #define DEFAULT_AUTO_MODE           false
 #define DEFAULT_BLOCK_COUNT         0
@@ -35,6 +36,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define DEFAULT_SAMPLE_THRESHOLD    10
 #define DEFAULT_VERBOSE_MODE        false
 #define DEFAULT_ZMQ                 false
+
+static volatile bool stop_program = false;
+
+void handle_interrupt(int nop) {
+  stop_program = true;
+}
 
 struct
 {
@@ -53,6 +60,9 @@ struct
   char      *zmq_sub_url;
   char      *zmq_pub_url;
 } options;
+
+zsock_t *sub;
+zsock_t *pub;
 
 void usage()
 {
@@ -103,7 +113,16 @@ void run()
     fseek(options.input_file, options.offset, SEEK_SET);
   }
 
-  while ((n = fread(data, sizeof(uint8_t)*2, options.block_size, options.input_file)) > 0) {
+  //while ((n = fread(data, sizeof(uint8_t)*2, options.block_size, options.input_file)) > 0) {
+  zframe_t *zdata;
+  while (! stop_program) {
+    // grap data and loop if nothing to do.
+    zdata = zframe_recv(sub);
+    n = zframe_size(zdata);
+    if(n == 0)
+      continue;
+
+    data = zframe_data(zdata);
     acc = 0;
     count = 0;
     for (i = 0; i < n; i++) {
@@ -128,12 +147,14 @@ void run()
       // Write the previous block, if configured
       if (options.padding_blocks) {
         if (!triggered) {
+          zsock_send(pub, "b", data == data_a?data_b:data_a, 2*sizeof(uint8_t) * options.block_size );
           fwrite(data == data_a?data_b:data_a, sizeof(uint8_t)*2,
                  options.block_size, options.output_file);
         }
       }
 
       // Write this block
+      zsock_send(pub, "b", data, 2*sizeof(uint8_t) * options.block_size );
       fwrite(data, sizeof(uint8_t)*2, options.block_size, options.output_file);
       triggered = true;
     } else { // Block was not over the threshold
@@ -146,6 +167,7 @@ void run()
       // Write the block following the event, if configured
       if (triggered) {
         if (options.padding_blocks) {
+          zsock_send(pub, "b", data, 2*sizeof(uint8_t) * options.block_size );
           fwrite(data, sizeof(uint8_t)*2, options.block_size, options.output_file);
         }
       }
@@ -176,6 +198,7 @@ void run()
 int main(int argc, char *argv[])
 {
   int opt;
+  signal(SIGINT, handle_interrupt);
 
   bool zmq_sub_isset = false;  // just to track if the options are set correctly.
   bool zmq_pub_isset = false;
@@ -249,6 +272,10 @@ int main(int argc, char *argv[])
       fprintf(stderr, "You specified one of the two ZMQ options. Both -y and -z must be set if you use ZMQ... Exiting");
       exit(EXIT_FAILURE);
     }
+
+    sub = zsock_new_sub(options.zmq_sub_url, ZMQ_NULL);
+    pub = zsock_new_pub(options.zmq_pub_url);
+
   } else {
     if (optind < argc) {
       if (strcmp(argv[optind], "-") == 0) {
@@ -297,6 +324,12 @@ int main(int argc, char *argv[])
 
   if (! options.zmq_enabled && options.output_file != stdout) {
     fclose(options.output_file);
+  }
+
+  if(options.zmq_enabled)
+  {
+    zmq_close(&pub);
+    zmq_close(&sub);
   }
 
   return EXIT_SUCCESS;
