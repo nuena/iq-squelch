@@ -1,7 +1,7 @@
-# cmake_minimum_required(VERSION <specify CMake version here>)
+cmake_minimum_required(VERSION 3.10)
 project(iq_squelch)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_C_STANDARD 11)
 
 add_executable(iq_squelch
         iq-squelch.c

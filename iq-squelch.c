@@ -37,9 +37,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define DEFAULT_VERBOSE_MODE        false
 #define DEFAULT_ZMQ                 false
 
+#define NUM_ZMQ_STREAMS             4
+
 static volatile bool stop_program = false;
 
 void handle_interrupt(int nop) {
+  fprintf(stderr, "Cought interrupt. Ending program gracefully!");
   stop_program = true;
 }
 
@@ -87,6 +90,14 @@ void usage()
     );
 }
 
+void emit_data(byte* data, size_t size_of_element, uint16_t num_elements)
+{
+  if(options.zmq_enabled)
+    zsock_send(pub, "b", data, num_elements * size_of_element);
+  else
+    fwrite(data, size_of_element, num_elements, options.output_file);
+}
+
 void run()
 {
   uint8_t *data, *data_a, *data_b;
@@ -116,74 +127,84 @@ void run()
   //while ((n = fread(data, sizeof(uint8_t)*2, options.block_size, options.input_file)) > 0) {
   zframe_t *zdata;
   while (! stop_program) {
-    // grap data and loop if nothing to do.
+    // grab data and loop if nothing to do.
     zdata = zframe_recv(sub);
-    n = zframe_size(zdata);
+    n = zframe_size(zdata) / NUM_ZMQ_STREAMS;
     if(n == 0)
       continue;
 
-    data = zframe_data(zdata);
-    acc = 0;
-    count = 0;
-    for (i = 0; i < n; i++) {
-      // Fast approximation of the magnitude of this sample
-      mag = (uint8_t)(abs((uint16_t)data[i*2]   - INT8_MAX) +
-                      abs((uint16_t)data[i*2+1] - INT8_MAX));
-      if (mag > options.sample_threshold) {
-        count++;
-      }
-      acc += mag;
-    }
+    byte *full_data = zframe_data(zdata);
+    byte *ch1 = full_data;
+    byte *ch2 = full_data + n;
+    byte *ch3 = full_data + 2*n;
+    byte *ch4 = full_data + 3*n;
 
-    // Did this block have enough samples over the threshold?
-    if (count > block_threshold) {
-      if (options.verbose) {
-        if (!triggered) {
-          fprintf(stderr, "Output triggered from byte offset %lu to ...", position);
-          event_count++;
+    // divide all data in chunks and progress them one by one:
+    while (n > 2*sizeof(uint8_t) * options.block_size) {
+      memcpy(data, &ch1[1], 2*sizeof(uint8_t) * options.block_size); // copy 2*blocK_size into to-be-progressed array
+      ch1 += 2*sizeof(uint8_t) * options.block_size;
+      n -= 2*sizeof(uint8_t) * options.block_size;
+
+      acc = 0;
+      count = 0;
+      for (i = 0; i < options.block_size; i++) {
+        // Fast approximation of the magnitude of this sample
+        mag = (uint8_t) (abs((uint16_t) data[i * 2] - INT8_MAX) +
+                         abs((uint16_t) data[i * 2 + 1] - INT8_MAX));
+        if (mag > options.sample_threshold) {
+          count++;
         }
+        acc += mag;
       }
 
-      // Write the previous block, if configured
-      if (options.padding_blocks) {
-        if (!triggered) {
-          zsock_send(pub, "b", data == data_a?data_b:data_a, 2*sizeof(uint8_t) * options.block_size );
-          fwrite(data == data_a?data_b:data_a, sizeof(uint8_t)*2,
-                 options.block_size, options.output_file);
+      // Did this block have enough samples over the threshold?
+      if (count > block_threshold) {
+        if (options.verbose) {
+          if (!triggered) {
+            fprintf(stderr, "Output triggered from byte offset %lu to ...", position);
+            event_count++;
+          }
         }
-      }
 
-      // Write this block
-      zsock_send(pub, "b", data, 2*sizeof(uint8_t) * options.block_size );
-      fwrite(data, sizeof(uint8_t)*2, options.block_size, options.output_file);
-      triggered = true;
-    } else { // Block was not over the threshold
-      if (options.verbose) {
-        if (triggered) {
-          fprintf(stderr, "\b\b\b%lu\n", position);
-        }
-      }
-
-      // Write the block following the event, if configured
-      if (triggered) {
+        // Write the previous block, if configured
         if (options.padding_blocks) {
-          zsock_send(pub, "b", data, 2*sizeof(uint8_t) * options.block_size );
-          fwrite(data, sizeof(uint8_t)*2, options.block_size, options.output_file);
+          if (!triggered) {
+            emit_data(data == data_a ? data_b : data_a, sizeof(uint8_t) * 2,
+                   options.block_size);
+          }
         }
+
+        // Write this block
+        emit_data(data, sizeof(uint8_t) * 2, options.block_size);
+        triggered = true;
+      } else { // Block was not over the threshold
+        if (options.verbose) {
+          if (triggered) {
+            fprintf(stderr, "\b\b\b%lu\n", position);
+          }
+        }
+
+        // Write the block following the event, if configured
+        if (triggered) {
+          if (options.padding_blocks) {
+            emit_data(data, sizeof(uint8_t) * 2, options.block_size);
+          }
+        }
+
+        // We try to only include blocks below the threshold in the average
+        // to understand the background noise level
+        if (options.auto_mode) {
+          avg += acc / options.block_size;
+          avg /= 2;
+        }
+
+        triggered = false;
       }
 
-      // We try to only include blocks below the threshold in the average
-      // to understand the background noise level
-      if (options.auto_mode) {
-        avg += acc / options.block_size;
-        avg /= 2;
-      }
-
-      triggered = false;
+      position += n * (sizeof(uint8_t) * 2);
+      data = data == data_a ? data_b : data_a; // Swap buffers
     }
-
-    position += n*(sizeof(uint8_t)*2);
-    data = data == data_a ? data_b : data_a; // Swap buffers
+    zframe_destroy(&zdata);
   }
 
   if (options.verbose) {
@@ -212,6 +233,7 @@ int main(int argc, char *argv[])
   options.padding_blocks    = DEFAULT_PADDING_BLOCKS;
   options.sample_threshold  = DEFAULT_SAMPLE_THRESHOLD;
   options.verbose           = DEFAULT_VERBOSE_MODE;
+  options.zmq_enabled       = DEFAULT_ZMQ;
 
   while ((opt = getopt(argc, argv, "ab:c:o:pm:s:t:vy:z:")) > 0) {
     switch (opt) {
@@ -273,8 +295,15 @@ int main(int argc, char *argv[])
       exit(EXIT_FAILURE);
     }
 
-    sub = zsock_new_sub(options.zmq_sub_url, ZMQ_NULL);
+    sub = zsock_new_sub(options.zmq_sub_url, "");
     pub = zsock_new_pub(options.zmq_pub_url);
+
+    // check that opening the sockets was sucessful:
+    if(sub == NULL)
+    {
+      fprintf(stderr, "Something went wrong. ZMQ SUB socket %s not opened successfully!", options.zmq_sub_url);
+      exit(EXIT_FAILURE);
+    }
 
   } else {
     if (optind < argc) {
