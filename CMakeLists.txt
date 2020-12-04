@@ -9,4 +9,5 @@ add_executable(iq_squelch
 
 find_library(CZMQ czmq)
 find_library(ZMQ zmq)
-target_link_libraries(iq_squelch LINK_PUBLIC ${CZMQ} ${ZMQ})
+find_library(GSL gsl)
+target_link_libraries(iq_squelch LINK_PUBLIC ${CZMQ} ${ZMQ} ${GSL})
